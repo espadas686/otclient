@@ -430,7 +430,9 @@ private:
 
     // 15x
     void parseWeaponProficiencyExperience(const InputMessagePtr& msg);
-    void parseWeaponProficiencyInfo(const InputMessagePtr& msg);
+       void parseWeaponProficiencyInfo(const InputMessagePtr& msg);
+    // OCERAOT: opcode 0xBB on protocol >= 1531, see protocolgameparse.cpp for why this is safe.
+    void parseWeaponProficiencyReshapeOffers(const InputMessagePtr& msg);
 
     // 15.2x
     void parseTaskBoardData(const InputMessagePtr& msg);

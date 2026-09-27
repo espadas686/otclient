@@ -61,7 +61,11 @@ local supportedClients = {
     1281, 1285, 1286, 1287, 1291,
     1300, 1310, 1311, 1314, 1316, 1320, 1321, 1322, 1332, 1334, 1336, 1337, 1340,
     1400, 1405, 1410, 1412,
-    1500, 1501, 1503, 1510, 1511, 1512, 1513, 1514, 1520, 1521, 1522, 1523, 1524, 1525
+             1500, 1501, 1503, 1510, 1511, 1512, 1513, 1514, 1520, 1521, 1522, 1523, 1524, 1525,
+    -- OCERAOT: agregado para hablar exactamente la version que exige crystalserver
+    -- (protocolgame.hpp CLIENT_VERSION = 1531; el server rechaza cualquier otro numero).
+    -- Ver OCERAOT-PROTOCOL-GAP-NOTES.md para lo que SI y NO esta confirmado a este nivel.
+    1531
 }
 
 function g_game.getSupportedClients()

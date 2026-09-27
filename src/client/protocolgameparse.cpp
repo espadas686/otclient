@@ -468,7 +468,16 @@ void ProtocolGame::parseMessage(const InputMessagePtr& msg)
                     parseTaskHuntingBasicData(msg);
                     break;
                 case Proto::GameServerTaskHuntingData:
-                    parseTaskHuntingData(msg);
+                    // OCERAOT: crystalserver 1531 repurposes this exact opcode (0xBB) for
+                    // "Weapon Proficiency Reshape offers" (Ghidra-confirmed FUN_140601bf0,
+                    // see OceraOT-Principal protocolgame.cpp ~line 11517). Confirmed harmless:
+                    // OceraOT's own sendTaskHuntingData() is an empty stub that never sends
+                    // anything, so the legacy meaning is provably dead on this server.
+                    if (g_game.getClientVersion() >= 1531) {
+                        parseWeaponProficiencyReshapeOffers(msg);
+                    } else {
+                        parseTaskHuntingData(msg);
+                    }
                     break;
                 case Proto::GameServerBosstiaryCooldownTimer:
                     parseBosstiaryCooldownTimer(msg);
@@ -2812,6 +2821,15 @@ void ProtocolGame::parsePlayerState(const InputMessagePtr& msg) const
 void ProtocolGame::parsePlayerCancelAttack(const InputMessagePtr& msg)
 {
     const uint32_t seq = g_game.getFeature(Otc::GameAttackSeq) ? msg->getU32() : 0;
+    // OCERAOT: crystalserver 1531 (marker OCERAOT-P6-575-V1-CANCELTARGET-SECOND-U32)
+    // writes a SECOND uint32_t after the first on this opcode (0xA3 / GameServerClearTarget).
+    // This is not a stock Tibia protocol change (confirmed only in OceraOT's own source
+    // comments), so it is gated strictly on OceraOT's exact client version, not a GameFeature.
+    // Without this, every cancelled attack/target leaves 4 unread bytes that misalign the
+    // next message in the same network buffer -- a frequent event during combat.
+    if (g_game.getClientVersion() >= 1531) {
+        msg->getU32();
+    }
     g_game.processAttackCancel(seq);
 }
 
@@ -4334,6 +4352,41 @@ ItemPtr ProtocolGame::getItem(const InputMessagePtr& msg, int id)
         throw Exception("ProtocolGame::getItem: unable to create item with invalid id {}", id);
     }
 
+    // OCERAOT (marker OCERAOT-P7-ITEMDESYNC-FIX-V1): root cause confirmed via
+    // read-only inspection of the real crystalserver source
+    // (src/server/network/protocol/protocolgame.cpp, ProtocolGame::AddItem /
+    // GetTileDescription) plus OceraOT-Principal's config.lua.
+    //
+    // AddItem() on the server writes the container-type, podium, upgrade
+    // tier, clock/expire, wear-out-charges and wrap-kit fields UNCONDITIONALLY
+    // whenever the underlying item has that property -- there is no feature
+    // check on the write side for protocol 1531 (oldProtocol == false).
+    // On the client (this function), each of those fields is gated behind a
+    // GameFeature_t flag that is only ever turned on by the server's
+    // sendOTCRFeatures(), which reads OTCRFeatures.enableFeature from
+    // config.lua. OceraOT-Principal's config.lua only enables {101,102,103,
+    // 118} (GameItemShader / GameCreatureAttachedEffect / GameCreatureShader /
+    // GameWingsAurasEffectsShader -- cosmetic OTCR extras). It never enables
+    // GameContainerTypes(106), GameThingPodium(85),
+    // GameThingUpgradeClassification(86), GameThingClock(88),
+    // GameThingCounter(87) or GameWrapKit(112).
+    //
+    // Net effect: the very first container (a backpack), Forge-tiered item,
+    // decaying item, wear-charge item or podium on any visible tile causes
+    // this client to under-read the item by 1-13 bytes relative to what the
+    // server wrote, permanently desyncing the rest of the network message --
+    // this is what produced the observed "ProtocolGame::getThing: invalid
+    // thing id" exception only ~1924 bytes into the initial ~15925-byte
+    // GameServerFullMap message, and the missing combat-stat/equipment values
+    // in the Skills window downstream of it.
+    //
+    // Fixed here ONLY for this client build, gated strictly on OceraOT's own
+    // protocol version (1531) via "|| g_game.getClientVersion() >= 1531" on
+    // each affected feature check below -- the server's config.lua / feature
+    // negotiation is intentionally left untouched, since it also governs the
+    // official OceraOT client (confirmed unaffected by this bug), and forcing
+    // these features on server-side could change its wire format too.
+
     if (g_game.getClientVersion() < 1281 && g_game.getFeature(Otc::GameThingMarks)) {
         msg->getU8(); // mark
     }
@@ -4353,7 +4406,10 @@ ItemPtr ProtocolGame::getItem(const InputMessagePtr& msg, int id)
     }
 
     if (item->isContainer()) {
-        if (g_game.getFeature(Otc::GameContainerTypes)) {
+        // OCERAOT-P7-ITEMDESYNC-FIX-V1: server always writes the container-type
+        // byte (+ payload) when the item is a real container, regardless of
+        // GameContainerTypes negotiation. See comment above getItem().
+        if (g_game.getFeature(Otc::GameContainerTypes) || g_game.getClientVersion() >= 1531) {
             const uint8_t containerType = msg->getU8(); // container type
             switch (containerType) {
                 case 1: // Loot Container
@@ -4413,7 +4469,11 @@ ItemPtr ProtocolGame::getItem(const InputMessagePtr& msg, int id)
         }
     }
 
-    if (g_game.getFeature(Otc::GameThingPodium)) {
+    // OCERAOT-P7-ITEMDESYNC-FIX-V1: server always writes the podium fields
+    // below when the item is a podium, regardless of GameThingPodium
+    // negotiation (confirmed via AddItem's "if (it.isPodium) {...}" block,
+    // which has no feature check). See comment above getItem().
+    if (g_game.getFeature(Otc::GameThingPodium) || g_game.getClientVersion() >= 1531) {
         if (item->isPodium()) {
             const uint16_t looktype = msg->getU16();
             if (looktype != 0) {
@@ -4439,27 +4499,39 @@ ItemPtr ProtocolGame::getItem(const InputMessagePtr& msg, int id)
         }
     }
 
-    if (g_game.getFeature(Otc::GameThingUpgradeClassification)) {
+        // OCERAOT-P7-ITEMDESYNC-FIX-V1: server writes the tier byte unconditionally
+    // when it.upgradeClassification > 0 (Forge-upgraded items), regardless of
+    // GameThingUpgradeClassification negotiation. See comment above getItem().
+    if (g_game.getFeature(Otc::GameThingUpgradeClassification) || g_game.getClientVersion() >= 1531) {
         if (item->getClassification()) {
             item->setTier(msg->getU8());
         }
     }
 
-    if (g_game.getFeature(Otc::GameThingClock)) {
+    // OCERAOT-P7-ITEMDESYNC-FIX-V1: server writes duration+brand-new
+    // unconditionally when it.expire/expireStop/clockExpire, regardless of
+    // GameThingClock negotiation. See comment above getItem().
+    if (g_game.getFeature(Otc::GameThingClock) || g_game.getClientVersion() >= 1531) {
         if (item->hasClockExpire() || item->hasExpire() || item->hasExpireStop()) {
             item->setDurationTime(msg->getU32());
             msg->getU8(); // Is brand-new
         }
     }
 
-    if (g_game.getFeature(Otc::GameThingCounter)) {
+    // OCERAOT-P7-ITEMDESYNC-FIX-V1: server writes charges+brand-new
+    // unconditionally when it.wearOut, regardless of GameThingCounter
+    // negotiation. See comment above getItem().
+    if (g_game.getFeature(Otc::GameThingCounter) || g_game.getClientVersion() >= 1531) {
         if (item->hasWearOut()) {
             item->setCharges(msg->getU32());
             msg->getU8(); // Is brand-new
         }
     }
 
-    if (g_game.getFeature(Otc::GameWrapKit)) {
+    // OCERAOT-P7-ITEMDESYNC-FIX-V1: server writes the unwrap-id u16
+    // unconditionally when it.isWrapKit && !oldProtocol, regardless of
+    // GameWrapKit negotiation. See comment above getItem().
+    if (g_game.getFeature(Otc::GameWrapKit) || g_game.getClientVersion() >= 1531) {
         if (item->isDecoKit()) {
             msg->getU16();
         }
@@ -7329,6 +7401,21 @@ void ProtocolGame::parseWeaponProficiencyInfo(const InputMessagePtr& msg)
         const uint8_t perkPosition = msg->getU8();
         perks.push_back({ level, perkPosition });
     }
+    // OCERAOT: crystalserver 1531 ("Tibia 15.31 / Summer Update 2026") always appends a SECOND
+    // list here -- the weapon's modified (reshaped) slots -- after the active-perks list above.
+    // Confirmed byte layout from OceraOT's own sendWeaponProficiencyInfo: u8 count, then
+    // count x { u8 level, u8 perkPosition, u16 perkType, u8 value }. Not a stock Tibia feature
+    // (gated on OceraOT's exact client version), but REQUIRED reading or every subsequent
+    // opcode in this network buffer desyncs, since 0xC4 is a recognized/handled opcode.
+    if (g_game.getClientVersion() >= 1531) {
+        const uint8_t modifiedSlotsCount = msg->getU8();
+        for (int i = 0; i < modifiedSlotsCount; ++i) {
+            msg->getU8();  // level
+            msg->getU8();  // perkPosition
+            msg->getU16(); // perkType
+            msg->getU8();  // value
+        }
+    }
     constexpr uint16_t MarketCategoryWeaponsAll = 32;
     uint16_t marketCategory = MarketCategoryWeaponsAll;
     if (g_things.isValidDatId(itemId, ThingCategoryItem)) {
@@ -7341,6 +7428,30 @@ void ProtocolGame::parseWeaponProficiencyInfo(const InputMessagePtr& msg)
         }
     }
     g_lua.callGlobalField("g_game", "onWeaponProficiency", itemId, experience, perks, marketCategory);
+}
+
+// OCERAOT: 0xBB on protocol >= 1531 - Weapon Proficiency "Reshape" offers.
+// Wire format confirmed byte-for-byte from OceraOT-Principal's own
+// sendWeaponProficiencyReshapeOffers (protocolgame.cpp ~line 11506-11539):
+//   u16 itemId, u8 curLevel(0-based), u8 curPos(0-based), u8 count,
+//   count x { u16 perkType, u8 rank }
+// Same rank+perkType encoding as a 0xC4 modified slot, no name string.
+void ProtocolGame::parseWeaponProficiencyReshapeOffers(const InputMessagePtr& msg)
+{
+    const uint16_t itemId = msg->getU16();
+    const uint8_t currentLevel = msg->getU8();
+    const uint8_t currentPosition = msg->getU8();
+    const uint8_t offersCount = msg->getU8();
+
+    std::vector<std::vector<uint16_t>> offers;
+    offers.reserve(offersCount);
+    for (int i = 0; i < offersCount; ++i) {
+        const uint16_t perkType = msg->getU16();
+        const uint8_t rank = msg->getU8();
+        offers.push_back({ perkType, rank });
+    }
+
+    g_lua.callGlobalField("g_game", "onWeaponProficiencyReshapeOffers", itemId, currentLevel, currentPosition, offers);
 }
 
 // 0x5F - parse destiny wheel window

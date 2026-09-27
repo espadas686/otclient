@@ -93,6 +93,23 @@ if ENABLE_SERVERS then
             port = 7171,
             protocol = 860,
             httpLogin = false
+        },
+
+        -- OCERAOT
+        ---
+        -- Servicio de login unificado (World Directory) confirmado en
+        -- conf/config.ini del cliente oficial: lista personajes de los
+        -- 3 mundos (Principal/Test/Hyrule) en una sola respuesta.
+        -- NO_PROVEN todavia: si este OTClient parseara esa respuesta
+        -- identico al cliente oficial (mismo JSON, mismo protocolo=1531).
+        -- @class table
+        -- @name oceraot_directory
+        --
+        ["https://oceraot.com/oceraot-directory-1531/login.php"] = {
+            port = 443,
+            protocol = 1531,
+            httpLogin = true,
+            useAuthenticator = false
         }
     }
 end
